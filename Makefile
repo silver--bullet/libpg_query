@@ -5,6 +5,21 @@ ARLIB = lib$(TARGET).a
 PGDIR = $(root_dir)/tmp/postgres
 PGDIRBZ2 = $(root_dir)/tmp/postgres.tar.bz2
 
+SYM_FILE = pg_query.sym
+ifeq ($(OS),Windows_NT)
+	DYNLIB = lib$(TARGET)_dyn.dll
+	DYNOPTS = -shared -Wl,--retain-symbols-file=$(SYM_FILE)
+else
+	UNAME_S := $(shell uname -s)
+	ifeq ($(UNAME_S),Darwin)
+		DYNLIB = lib$(TARGET)_dyn.bundle
+		DYNOPTS = -shared -Wl,-exported_symbols_list $(SYM_FILE)
+	else
+		DYNLIB = lib$(TARGET)_dyn.so
+		DYNOPTS = -shared -Wl,--retain-symbols-file=$(SYM_FILE)
+	endif
+endif
+
 PG_VERSION = 9.5.7
 
 SRC_FILES := $(wildcard src/*.c src/postgres/*.c)
@@ -26,7 +41,7 @@ else
 	PG_CFLAGS += -O3
 endif
 
-CLEANLIBS = $(ARLIB)
+CLEANLIBS = $(ARLIB) $(DYNLIB)
 CLEANOBJS = $(OBJ_FILES)
 CLEANFILES = $(PGDIRBZ2)
 
@@ -38,7 +53,7 @@ CC ?= cc
 
 all: examples test build
 
-build: $(ARLIB)
+build: $(ARLIB) $(DYNLIB)
 
 clean:
 	-@ $(RM) $(CLEANLIBS) $(CLEANOBJS) $(CLEANFILES) $(EXAMPLES) $(TESTS)
@@ -77,6 +92,9 @@ extract_source: $(PGDIR)
 
 $(ARLIB): $(OBJ_FILES) Makefile
 	@$(AR) $@ $(OBJ_FILES)
+
+$(DYNLIB): $(OBJ_FILES) Makefile
+	@$(CC) $(DYNOPTS) -o $@ $(OBJ_FILES)
 
 EXAMPLES = examples/simple examples/normalize examples/simple_error examples/normalize_error examples/simple_plpgsql
 examples: $(EXAMPLES)
