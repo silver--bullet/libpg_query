@@ -7,7 +7,7 @@ PGDIRBZ2 = $(root_dir)/tmp/postgres.tar.bz2
 
 PG_VERSION = 10rc1
 
-SRC_FILES := $(wildcard src/*.c src/postgres/*.c)
+SRC_FILES := $(wildcard src/*.c src/postgres/*.c) protobuf-c/protobuf-c.c protobuf/scan_output.pb-c.c
 OBJ_FILES := $(SRC_FILES:.c=.o)
 NOT_OBJ_FILES := src/pg_query_fingerprint_defs.o src/pg_query_fingerprint_conds.o src/pg_query_json_defs.o src/pg_query_json_conds.o src/postgres/guc-file.o src/postgres/scan.o src/pg_query_json_helper.o
 OBJ_FILES := $(filter-out $(NOT_OBJ_FILES), $(OBJ_FILES))
@@ -77,9 +77,13 @@ extract_source: $(PGDIR)
 $(ARLIB): $(OBJ_FILES) Makefile
 	@$(AR) $@ $(OBJ_FILES)
 
-EXAMPLES = examples/simple examples/normalize examples/simple_error examples/normalize_error examples/simple_plpgsql
+protobuf/scan_output.pb-c.c:
+	protoc --c_out=. protobuf/scan_output.proto
+
+EXAMPLES = examples/simple examples/scan examples/normalize examples/simple_error examples/normalize_error examples/simple_plpgsql
 examples: $(EXAMPLES)
 	examples/simple
+	examples/scan
 	examples/normalize
 	examples/simple_error
 	examples/normalize_error
@@ -87,6 +91,9 @@ examples: $(EXAMPLES)
 
 examples/simple: examples/simple.c $(ARLIB)
 	$(CC) -I. -o $@ -g examples/simple.c $(ARLIB)
+
+examples/scan: examples/scan.c $(ARLIB)
+	$(CC) -I. -o $@ -g examples/scan.c $(ARLIB)
 
 examples/normalize: examples/normalize.c $(ARLIB)
 	$(CC) -I. -o $@ -g examples/normalize.c $(ARLIB)
@@ -100,13 +107,14 @@ examples/normalize_error: examples/normalize_error.c $(ARLIB)
 examples/simple_plpgsql: examples/simple_plpgsql.c $(ARLIB)
 	$(CC) -I. -o $@ -g examples/simple_plpgsql.c $(ARLIB)
 
-TESTS = test/complex test/concurrency test/fingerprint test/normalize test/parse test/parse_plpgsql
+TESTS = test/complex test/concurrency test/fingerprint test/normalize test/parse test/parse_plpgsql test/scan
 test: $(TESTS)
 	test/complex
 	test/concurrency
 	test/fingerprint
 	test/normalize
 	test/parse
+	test/scan
 	# Output-based tests
 	test/parse_plpgsql
 	diff -Naur test/plpgsql_samples.expected.json test/plpgsql_samples.actual.json
@@ -128,3 +136,6 @@ test/parse: test/parse.c test/parse_tests.c $(ARLIB)
 
 test/parse_plpgsql: test/parse_plpgsql.c $(ARLIB)
 	$(CC) -I. -o $@ -I./src -I./src/postgres/include -g test/parse_plpgsql.c $(ARLIB)
+
+test/scan: test/scan.c test/scan_tests.c $(ARLIB)
+	$(CC) -I. -o $@ -g test/scan.c $(ARLIB)
