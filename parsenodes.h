@@ -130,7 +130,17 @@ struct IntoClause;
 struct TableFunc;
 // struct Index;
 // struct AclMode;
-struct Expr;
+/*
+ * Expr - generic superclass for executable-expression nodes
+ *
+ * All node types that are used in executable expression trees should derive
+ * from Expr (that is, have Expr as their first field).  Since Expr only
+ * contains NodeTag, this is a formality, but it is an easy form of
+ * documentation.  See also the ExprState node types in execnodes.h.
+ */
+typedef struct Expr {
+  NodeTag type;
+} Expr;
 // struct OnCommitAction;
 
 typedef enum OverridingKind {
@@ -161,6 +171,155 @@ typedef enum SortByNulls {
   SORTBY_NULLS_FIRST,
   SORTBY_NULLS_LAST
 } SortByNulls;
+
+/*
+ * BoolExpr - expression node for the basic Boolean operators AND, OR, NOT
+ *
+ * Notice the arguments are given as a List.  For NOT, of course the list
+ * must always have exactly one element.  For AND and OR, there can be two
+ * or more arguments.
+ */
+typedef enum BoolExprType { AND_EXPR, OR_EXPR, NOT_EXPR } BoolExprType;
+
+typedef struct BoolExpr {
+  Expr xpr;
+  BoolExprType boolop;
+  List *args;   /* arguments to this expression */
+  int location; /* token location, or -1 if unknown */
+} BoolExpr;
+
+/*----------
+ * CaseExpr - a CASE expression
+ *
+ * We support two distinct forms of CASE expression:
+ *		CASE WHEN boolexpr THEN expr [ WHEN boolexpr THEN expr ... ]
+ *		CASE testexpr WHEN compexpr THEN expr [ WHEN compexpr THEN expr ... ]
+ * These are distinguishable by the "arg" field being NULL in the first case
+ * and the testexpr in the second case.
+ *
+ * In the raw grammar output for the second form, the condition expressions
+ * of the WHEN clauses are just the comparison values.  Parse analysis
+ * converts these to valid boolean expressions of the form
+ *		CaseTestExpr '=' compexpr
+ * where the CaseTestExpr node is a placeholder that emits the correct
+ * value at runtime.  This structure is used so that the testexpr need be
+ * evaluated only once.  Note that after parse analysis, the condition
+ * expressions always yield boolean.
+ *
+ * Note: we can test whether a CaseExpr has been through parse analysis
+ * yet by checking whether casetype is InvalidOid or not.
+ *----------
+ */
+typedef struct CaseExpr {
+  Expr xpr;
+  Oid casetype;    /* type of expression result */
+  Oid casecollid;  /* OID of collation, or InvalidOid if none */
+  Expr *arg;       /* implicit equality comparison argument */
+  List *args;      /* the arguments (list of WHEN clauses) */
+  Expr *defresult; /* the default result (ELSE clause) */
+  int location;    /* token location, or -1 if unknown */
+} CaseExpr;
+
+/*
+ * SubLink
+ *
+ * A SubLink represents a subselect appearing in an expression, and in some
+ * cases also the combining operator(s) just above it.  The subLinkType
+ * indicates the form of the expression represented:
+ *	EXISTS_SUBLINK		EXISTS(SELECT ...)
+ *	ALL_SUBLINK			(lefthand) op ALL (SELECT ...)
+ *	ANY_SUBLINK			(lefthand) op ANY (SELECT ...)
+ *	ROWCOMPARE_SUBLINK	(lefthand) op (SELECT ...)
+ *	EXPR_SUBLINK		(SELECT with single targetlist item ...)
+ *	MULTIEXPR_SUBLINK	(SELECT with multiple targetlist items ...)
+ *	ARRAY_SUBLINK		ARRAY(SELECT with single targetlist item ...)
+ *	CTE_SUBLINK			WITH query (never actually part of an expression)
+ * For ALL, ANY, and ROWCOMPARE, the lefthand is a list of expressions of the
+ * same length as the subselect's targetlist.  ROWCOMPARE will *always* have
+ * a list with more than one entry; if the subselect has just one target
+ * then the parser will create an EXPR_SUBLINK instead (and any operator
+ * above the subselect will be represented separately).
+ * ROWCOMPARE, EXPR, and MULTIEXPR require the subselect to deliver at most
+ * one row (if it returns no rows, the result is NULL).
+ * ALL, ANY, and ROWCOMPARE require the combining operators to deliver boolean
+ * results.  ALL and ANY combine the per-row results using AND and OR
+ * semantics respectively.
+ * ARRAY requires just one target column, and creates an array of the target
+ * column's type using any number of rows resulting from the subselect.
+ *
+ * SubLink is classed as an Expr node, but it is not actually executable;
+ * it must be replaced in the expression tree by a SubPlan node during
+ * planning.
+ *
+ * NOTE: in the raw output of gram.y, testexpr contains just the raw form
+ * of the lefthand expression (if any), and operName is the String name of
+ * the combining operator.  Also, subselect is a raw parsetree.  During parse
+ * analysis, the parser transforms testexpr into a complete boolean expression
+ * that compares the lefthand value(s) to PARAM_SUBLINK nodes representing the
+ * output columns of the subselect.  And subselect is transformed to a Query.
+ * This is the representation seen in saved rules and in the rewriter.
+ *
+ * In EXISTS, EXPR, MULTIEXPR, and ARRAY SubLinks, testexpr and operName
+ * are unused and are always null.
+ *
+ * subLinkId is currently used only for MULTIEXPR SubLinks, and is zero in
+ * other SubLinks.  This number identifies different multiple-assignment
+ * subqueries within an UPDATE statement's SET list.  It is unique only
+ * within a particular targetlist.  The output column(s) of the MULTIEXPR
+ * are referenced by PARAM_MULTIEXPR Params appearing elsewhere in the tlist.
+ *
+ * The CTE_SUBLINK case never occurs in actual SubLink nodes, but it is used
+ * in SubPlans generated for WITH subqueries.
+ */
+typedef enum SubLinkType {
+  EXISTS_SUBLINK,
+  ALL_SUBLINK,
+  ANY_SUBLINK,
+  ROWCOMPARE_SUBLINK,
+  EXPR_SUBLINK,
+  MULTIEXPR_SUBLINK,
+  ARRAY_SUBLINK,
+  CTE_SUBLINK /* for SubPlans only */
+} SubLinkType;
+
+typedef struct SubLink {
+  Expr xpr;
+  SubLinkType subLinkType; /* see above */
+  int subLinkId;           /* ID (1..n); 0 if not MULTIEXPR */
+  Node *testexpr;          /* outer-query test for ALL/ANY/ROWCOMPARE */
+  List *operName;          /* originally specified operator name */
+  Node *subselect;         /* subselect as Query* or raw parsetree */
+  int location;            /* token location, or -1 if unknown */
+} SubLink;
+
+/* ----------------
+ * NullTest
+ *
+ * NullTest represents the operation of testing a value for NULLness.
+ * The appropriate test is performed and returned as a boolean Datum.
+ *
+ * When argisrow is false, this simply represents a test for the null value.
+ *
+ * When argisrow is true, the input expression must yield a rowtype, and
+ * the node implements "row IS [NOT] NULL" per the SQL standard.  This
+ * includes checking individual fields for NULLness when the row datum
+ * itself isn't NULL.
+ *
+ * NOTE: the combination of a rowtype input and argisrow==false does NOT
+ * correspond to the SQL notation "row IS [NOT] NULL"; instead, this case
+ * represents the SQL notation "row IS [NOT] DISTINCT FROM NULL".
+ * ----------------
+ */
+
+typedef enum NullTestType { IS_NULL, IS_NOT_NULL } NullTestType;
+
+typedef struct NullTest {
+  Expr xpr;
+  Expr *arg;                 /* input expression */
+  NullTestType nulltesttype; /* IS NULL, IS NOT NULL */
+  bool argisrow;             /* T to perform field-by-field null checks */
+  int location;              /* token location, or -1 if unknown */
+} NullTest;
 
 /*
  * Grantable rights are encoded so that we can OR them together in a bitmask.
